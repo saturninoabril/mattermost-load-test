@@ -349,6 +349,144 @@ func actionGetChannel(c *EntityConfig) {
 	}
 }
 
+func actionGetChannelAroundLastUnreadPosts(c *EntityConfig) {
+	userId := ""
+	if user, resp := c.Client.GetMe(""); resp.Error != nil {
+		mlog.Error("Failed to get me", mlog.Err(resp.Error))
+		return
+	} else {
+		userId = user.Id
+	}
+
+	team, channel := c.UserData.PickTeamChannel(c.r)
+	if team == nil || channel == nil {
+		return
+	}
+
+	channelId, err := c.GetTeamChannelId(team.Name, channel.Name)
+	if err != nil {
+		mlog.Error("Unable to get channel from map", mlog.String("team", team.Name), mlog.String("channel", channel.Name), mlog.Err(err))
+		return
+	}
+
+	if _, resp := c.Client.ViewChannel("me", &model.ChannelView{
+		ChannelId:     channelId,
+		PrevChannelId: "",
+	}); resp.Error != nil {
+		mlog.Error("Unable to view channel.", mlog.String("channel_id", channelId), mlog.String("username", c.UserData.Username))
+	}
+
+	if _, resp := c.Client.GetChannelMember(channelId, "me", ""); resp.Error != nil {
+		mlog.Error("Unable to get channel member.", mlog.String("channel_id", channelId), mlog.String("username", c.UserData.Username), mlog.Err(resp.Error))
+	}
+
+	if _, resp := c.Client.GetChannelMembers(channelId, 0, 60, ""); resp.Error != nil {
+		mlog.Error("Unable to get channel members.", mlog.String("channel_id", channelId), mlog.String("username", c.UserData.Username), mlog.Err(resp.Error))
+	}
+
+	if _, resp := c.Client.GetChannelStats(channelId, ""); resp.Error != nil {
+		mlog.Error("Unable to get channel stats.", mlog.String("channel_id", channelId), mlog.String("username", c.UserData.Username), mlog.Err(resp.Error))
+	}
+
+	// The webapp is observed to invoke ViewChannel once without a PrevChannelId, and once with
+	// one specified. Duplicate that behaviour here.
+	prevChannel := team.PickChannel(c.r)
+	if prevChannel != nil {
+		prevChannelId, err := c.GetTeamChannelId(team.Name, prevChannel.Name)
+		if err != nil {
+			mlog.Error("Unable to get channel from map", mlog.String("team", team.Name), mlog.String("channel", channel.Name), mlog.Err(err))
+			return
+		}
+
+		if _, resp := c.Client.ViewChannel("me", &model.ChannelView{
+			ChannelId:     channelId,
+			PrevChannelId: prevChannelId,
+		}); resp.Error != nil {
+			mlog.Error("Unable to view channel.", mlog.String("channel_id", channelId), mlog.String("prev_channel_id", prevChannelId), mlog.String("username", c.UserData.Username))
+		}
+	}
+
+	if posts, resp := c.Client.GetPostsAroundLastUnread(userId, channelId, 60, 60); resp.Error != nil {
+		mlog.Error("Unable to get channel's posts around last unread.", mlog.String("channel_id", channelId), mlog.String("username", c.UserData.Username), mlog.Err(resp.Error))
+	} else {
+		if posts == nil {
+			mlog.Error(fmt.Sprintf("Got nil posts for get posts around last unread for channel. Resp was: %#v", resp))
+			return
+		}
+		for _, post := range posts.Posts {
+			if post.HasReactions {
+				if _, resp := c.Client.GetReactions(post.Id); resp.Error != nil {
+					mlog.Error("Unable to get reactions for post.", mlog.String("channel_id", channelId), mlog.String("username", c.UserData.Username), mlog.String("post_id", post.Id), mlog.Err(resp.Error))
+				}
+			}
+			if len(post.FileIds) > 0 {
+				if files, resp := c.Client.GetFileInfosForPost(post.Id, ""); resp.Error != nil {
+					mlog.Error("Unable to get file infos for post.", mlog.String("channel_id", channelId), mlog.String("username", c.UserData.Username), mlog.String("post_id", post.Id), mlog.Err(resp.Error))
+				} else {
+					for _, file := range files {
+						if file.IsImage() {
+							if _, resp := c.Client.GetFileThumbnail(file.Id); resp.Error != nil {
+								mlog.Error("Unable to get file thumbnail for file.", mlog.String("channel_id", channelId), mlog.String("username", c.UserData.Username), mlog.String("post_id", post.Id), mlog.String("file_id", file.Id), mlog.Err(resp.Error))
+							}
+						}
+					}
+				}
+			}
+
+			if rand.Float64() < c.LoadTestConfig.UserEntitiesConfiguration.LinkPreviewChance {
+				if _, resp := c.Client.OpenGraph(OPENGRAPH_TEST_URL); resp.Error != nil {
+					mlog.Error("Unable to get open graph for url.", mlog.String("url", OPENGRAPH_TEST_URL), mlog.String("user_id", post.UserId), mlog.Err(resp.Error))
+				}
+			}
+
+			if rand.Float64() < c.LoadTestConfig.UserEntitiesConfiguration.CustomEmojiChance && c.LoadTestConfig.LoadtestEnviromentConfig.NumEmoji > 0 {
+				name := c.LoadTestConfig.LoadtestEnviromentConfig.PickEmoji(c.r)
+				if _, resp := c.Client.GetEmojiByName(name); resp.Error != nil {
+					mlog.Error("Unable to get emoji.", mlog.String("emoji_name", name), mlog.String("user_id", post.UserId), mlog.Err(resp.Error))
+				}
+			}
+		}
+	}
+
+	usersToQueryById := make([]string, 0)
+	for rand.Float64() < c.LoadTestConfig.UserEntitiesConfiguration.NeedsProfilesByIdChance {
+		nextUser := "user" + strconv.Itoa(rand.Intn(c.LoadTestConfig.LoadtestEnviromentConfig.NumUsers))
+		usersToQueryById = append(usersToQueryById, nextUser)
+	}
+	if len(usersToQueryById) > 0 {
+		if _, resp := c.Client.GetUsersByIds(usersToQueryById); resp.Error != nil {
+			mlog.Error("Unable to get users by ids", mlog.Err(resp.Error))
+		}
+	}
+
+	usersToQueryByUsername := make([]string, 0)
+	for rand.Float64() < c.LoadTestConfig.UserEntitiesConfiguration.NeedsProfilesByUsernameChance {
+		if rand.Float64() > 0.5 {
+			nextUser := "user" + strconv.Itoa(rand.Intn(c.LoadTestConfig.LoadtestEnviromentConfig.NumUsers))
+			usersToQueryByUsername = append(usersToQueryByUsername, nextUser)
+		} else {
+			nextUser := model.NewId()
+			usersToQueryByUsername = append(usersToQueryByUsername, nextUser)
+		}
+	}
+	if len(usersToQueryByUsername) > 0 {
+		if _, resp := c.Client.GetUsersByUsernames(usersToQueryByUsername); resp.Error != nil {
+			mlog.Error("Unable to get users by usernames", mlog.Err(resp.Error))
+		}
+	}
+
+	usersToQueryForStatusById := make([]string, 0)
+	for rand.Float64() < c.LoadTestConfig.UserEntitiesConfiguration.NeedsProfileStatusChance {
+		nextUser := "user" + strconv.Itoa(rand.Intn(c.LoadTestConfig.LoadtestEnviromentConfig.NumUsers))
+		usersToQueryForStatusById = append(usersToQueryForStatusById, nextUser)
+	}
+	if len(usersToQueryForStatusById) > 0 {
+		if _, resp := c.Client.GetUsersStatusesByIds(usersToQueryForStatusById); resp.Error != nil {
+			mlog.Error("Unable to get user statuses by ids", mlog.Err(resp.Error))
+		}
+	}
+}
+
 func actionPerformSearch(c *EntityConfig) {
 	team, _ := c.UserData.PickTeamChannel(c.r)
 	if team == nil {
@@ -541,6 +679,16 @@ var getChannelEntity UserEntity = UserEntity{
 	},
 }
 
+var getChannelUnreadPostsEntity UserEntity = UserEntity{
+	Name: "Get Channel Around Last Unread Posts",
+	Actions: []randutil.Choice{
+		{
+			Item:   actionGetChannelAroundLastUnreadPosts,
+			Weight: 1,
+		},
+	},
+}
+
 var TestGetChannel TestRun = TestRun{
 	UserEntities: []randutil.Choice{
 		{
@@ -610,6 +758,10 @@ var standardUserEntity UserEntity = UserEntity{
 		},
 		{
 			Item:   actionGetChannel,
+			Weight: 56,
+		},
+		{
+			Item:   actionGetChannelAroundLastUnreadPosts,
 			Weight: 56,
 		},
 		{
